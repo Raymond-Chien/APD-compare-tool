@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>APD Compare & Edit Tool - Professional Edition</title>
+  <link rel="stylesheet" href="styles.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body class="dark">
+  <header>
+    <div class="logo">APD COMP DIFF <span style="font-size: 0.6rem; vertical-align: middle; color: #8b949e;">v2.0</span></div>
+    <div class="controls">
+      <div style="position: relative; display: flex; align-items: center;">
+        <input type="text" id="search-tag" placeholder="🔍 搜尋標籤 (Tag)..." 
+               style="background: #0d1117; border: 1px solid #30363d; border-radius: 20px; padding: 4px 35px 4px 30px; color: white; width: 220px; outline: none; transition: border-color 0.2s;"
+               oninput="handleSearch()">
+        <span style="position: absolute; left: 10px; font-size: 14px; pointer-events: none;">🔍</span>
+        <span id="clear-search-btn" onclick="clearSearch()" 
+              style="position: absolute; right: 10px; font-size: 12px; cursor: pointer; color: #8b949e; display: none;">✖</span>
+      </div>
+
+      <div style="width: 1px; height: 1.5rem; background: #30363d; margin: 0 0.5rem;"></div>
+
+      <button class="btn" onclick="document.getElementById('file-left').click()">
+        <span>📂</span> 載入 (A)
+      </button>
+      <input type="file" id="file-left" style="display: none" accept=".txt">
+      
+      <button class="btn" onclick="document.getElementById('file-right').click()">
+        <span>📂</span> 載入 (B)
+      </button>
+      <input type="file" id="file-right" style="display: none" accept=".txt">
+      
+      <div style="width: 1px; height: 1.5rem; background: #30363d; margin: 0 0.5rem;"></div>
+      
+      <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; cursor: pointer;">
+        <input type="checkbox" id="sync-scroll-check" checked onchange="toggleSyncScroll()"> 代碼捲動同步
+      </label>
+    </div>
+  </header>
+
+  <div class="action-overlay" id="summary-overlay" style="display: none; border-radius: 0; position: relative; bottom: auto; left: auto; transform: none; padding: 6px 2rem; width: 100%; border-top: none; justify-content: center; font-size: 13px;">
+    <div style="display: flex; align-items: center; gap: 0.5rem;">
+      <span style="color: #bc8cff;">●</span> 不同項目: <span id="count-diff">0</span>
+    </div>
+    <div style="display: flex; align-items: center; gap: 0.5rem; margin-left: 2rem;">
+      <span style="color: #f85146;">●</span> 缺失項目: <span id="count-miss">0</span>
+    </div>
+    <div style="display: flex; align-items: center; gap: 0.5rem; margin-left: 2rem;">
+      <span style="color: #2ea043;">●</span> 符合項目: <span id="count-match">0</span>
+    </div>
+    <div style="width: 1px; height: 1rem; background: #30363d; margin: 0 2rem;"></div>
+    <div style="font-size: 11px; color: #8b949e;">💡 點擊右側 💾 圖示可匯出編輯後的檔案</div>
+  </div>
+
+  <main>
+    <!-- Left Pane -->
+    <div class="side-panel" id="panel-left">
+      <div class="panel-header">
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <span class="file-path" id="path-left">請選擇檔案 A</span>
+        </div>
+        <div style="display: flex; gap: 4px;">
+          <button class="btn" style="padding: 2px 8px; font-size: 11px;" onclick="undoAllMerges('left')">全部取消</button>
+          <button class="btn" style="padding: 2px 8px; font-size: 11px;" onclick="mergeAllMissing('toRight')">補齊右側 ➡️</button>
+          <button class="btn" style="padding: 2px 8px; font-size: 11px;" onclick="saveFileAs('left')">💾 另存 A</button>
+        </div>
+      </div>
+      <div class="content-viewer" id="viewer-left">
+        <div style="display: flex; height: 100%; align-items: center; justify-content: center; color: #8b949e;">
+          等待 A 檔案載入...
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Pane -->
+    <div class="side-panel" id="panel-right" style="border-right: none;">
+      <div class="panel-header">
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <span class="file-path" id="path-right">請選擇檔案 B</span>
+        </div>
+        <div style="display: flex; gap: 4px;">
+          <button class="btn" style="padding: 2px 8px; font-size: 11px;" onclick="undoAllMerges('right')">全部取消</button>
+          <button class="btn" style="padding: 2px 8px; font-size: 11px;" onclick="mergeAllMissing('toLeft')">⬅️ 補齊左側</button>
+          <button class="btn" style="padding: 2px 8px; font-size: 11px;" onclick="saveFileAs('right')">💾 另存 B</button>
+        </div>
+      </div>
+      <div class="content-viewer" id="viewer-right">
+        <div style="display: flex; height: 100%; align-items: center; justify-content: center; color: #8b949e;">
+          等待 B 檔案載入...
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
