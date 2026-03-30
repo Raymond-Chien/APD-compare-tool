@@ -15,8 +15,14 @@ let originalBackups = {
   right: new Map()
 };
 
-document.getElementById('file-left').addEventListener('change', (e) => loadFile(e, 'left'));
-document.getElementById('file-right').addEventListener('change', (e) => loadFile(e, 'right'));
+// Main Entry: Initialize Listeners
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('file-left').addEventListener('change', (e) => loadFile(e, 'left'));
+    document.getElementById('file-right').addEventListener('change', (e) => loadFile(e, 'right'));
+    
+    // Bind Persistent Sync Scroll once
+    initSyncScroll();
+});
 
 function handleSearch() {
   const query = document.getElementById('search-tag').value.trim();
@@ -37,17 +43,13 @@ async function loadFile(event, side) {
   apdData[side].filename = file.name;
   document.getElementById(`path-${side}`).textContent = file.name;
   
-  // Clear session state
   mergedTags[side] = new Set();
   originalBackups[side] = new Map();
   
   parseAPD(content, side);
   renderPanel(side);
-  
-  // Show Health Report if errors exist
   showHealthReport(side);
 
-  // Auto-compare when both sides are loaded
   if (apdData.left.blocks.size > 0 && apdData.right.blocks.size > 0) {
     compareFiles();
   }
@@ -95,7 +97,10 @@ function parseAPD(content, side) {
           tagStack[tagStack.length - 1].isContainer = true;
           tagStack[tagStack.length - 1].childCount = (tagStack[tagStack.length - 1].childCount || 0) + 1;
       }
-      tagStack.push({ name: newTagName, content: [], startLine: lineNum, level: tagStack.length, isContainer: false, childCount: 0 });
+      
+      // FIXING LEVEL: Top tag is depth 1, child is depth 2
+      const currentLevel = tagStack.length + 1;
+      tagStack.push({ name: newTagName, content: [], startLine: lineNum, level: currentLevel, isContainer: false, childCount: 0 });
       rawOrder.push(newTagName);
     } else if (trimmed === '[END]') {
       if (tagStack.length > 0) {
@@ -166,7 +171,6 @@ function compareFiles() {
   document.getElementById('count-diff').textContent = diffCount;
   document.getElementById('count-miss').textContent = missCount;
   document.getElementById('count-match').textContent = matchCount;
-  syncScroll();
 }
 
 function createBlockEl(tag, content, state, side) {
@@ -174,13 +178,21 @@ function createBlockEl(tag, content, state, side) {
   wrapper.className = `apd-block ${state}`;
   if (state === 'empty') wrapper.classList.add('empty-block');
 
-  const meta = apdData[side].blocksMeta.get(tag) || { level: 0, isContainer: false, childCount: 0 };
-  const depth = meta.level || 0;
-  if (depth > 0) { wrapper.style.marginLeft = `${depth * 24}px`; wrapper.classList.add('child-block'); }
+  const meta = apdData[side].blocksMeta.get(tag) || { level: 1, isContainer: false, childCount: 0 };
+  const depth = (meta.level !== undefined) ? meta.level : 1;
+  
+  // Visual Indentation for hierarchy
+  if (depth > 1) { 
+      wrapper.style.marginLeft = `${(depth - 1) * 24}px`; 
+      wrapper.classList.add('child-block'); 
+  }
 
   const hasErrors = apdData[side].errors.some(e => e.tag === tag);
   if (hasErrors) wrapper.classList.add('has-errors');
-  if (meta.isContainer) { wrapper.classList.add('master-block'); wrapper.style.backgroundColor = 'rgba(255,255,255, 0.02)'; }
+  if (meta.isContainer) { 
+      wrapper.classList.add('master-block'); 
+      wrapper.style.backgroundColor = 'rgba(255,255,255, 0.02)'; 
+  }
 
   if (state === 'empty') {
     wrapper.innerHTML = `<span>(缺失項目: ${tag})</span>`;
@@ -197,7 +209,11 @@ function createBlockEl(tag, content, state, side) {
   const leftGroup = document.createElement('div');
   leftGroup.style.display = 'flex';
   leftGroup.style.alignItems = 'center';
-  if (depth > 0) leftGroup.innerHTML = `<span style="color:#555; margin-right:4px;">└── </span>`;
+  
+  // Tree line icon for children
+  if (depth > 1) {
+      leftGroup.innerHTML = `<span style="color:#555; margin-right:4px;">└── </span>`;
+  }
   leftGroup.innerHTML += `<span>${tag}</span>`;
 
   const rightGroup = document.createElement('div');
@@ -205,10 +221,10 @@ function createBlockEl(tag, content, state, side) {
   rightGroup.style.alignItems = 'center';
   rightGroup.style.gap = '6px';
   
-  if (meta.isContainer) rightGroup.innerHTML += `<span class="status-badge master-badge">📦 容器大項 (${meta.childCount})</span>`;
+  if (meta.isContainer) rightGroup.innerHTML += `<span class="status-badge master-badge">📦 容器 (${meta.childCount})</span>`;
   if (hasErrors) rightGroup.innerHTML += `<span class="status-badge" style="background:#d4a017; color:black;">⚠️ FORMAT</span>`;
   if (state === 'match-success') rightGroup.innerHTML += `<span class="status-badge badge-match">MATCH</span>`;
-  if (state === 'diff-changed') rightGroup.innerHTML += `<span class="status-badge badge-diff">DIFFERENT</span>`;
+  if (state === 'diff-changed') rightGroup.innerHTML += `<span class="status-badge badge-diff">DIFF</span>`;
   if (state === 'diff-removed' || state === 'diff-added') rightGroup.innerHTML += `<span class="status-badge badge-miss">MISSING</span>`;
   if (state === 'merged-item') rightGroup.innerHTML += `<span class="status-badge badge-merged">MERGED</span>`;
 
@@ -260,8 +276,8 @@ function copyBlock(tag, fromSide) {
       const viewer = document.getElementById(panelId);
       const blocks = viewer.getElementsByClassName('apd-block');
       for (let block of blocks) {
-          const headerSpan = block.querySelector('.block-header span:last-of-type');
-          if (headerSpan && headerSpan.textContent.includes(tag)) {
+          const firstSpan = block.querySelector('.block-header div span:last-of-type');
+          if (firstSpan && (firstSpan.textContent === tag || block.innerText.includes(tag))) {
               block.scrollIntoView({ behavior: 'smooth', block: 'center' });
               block.classList.add('flash-highlight');
               setTimeout(() => block.classList.remove('flash-highlight'), 2000);
@@ -294,17 +310,23 @@ function renderPanel(side) {
   apdData[side].rawOrder.forEach(tag => { viewer.appendChild(createBlockEl(tag, apdData[side].blocks.get(tag), 'normal', side)); });
 }
 
-function syncScroll() {
-  const vLeft = document.getElementById('viewer-left'); const vRight = document.getElementById('viewer-right');
-  const isSync = document.getElementById('sync-scroll-check').checked;
-  if (!isSync) { vLeft.onscroll = null; vRight.onscroll = null; return; }
-  const handleScroll = (e) => {
-    const source = e.target; const target = (source === vLeft) ? vRight : vLeft;
-    if (source._syncing) { source._syncing = false; return; }
-    target._syncing = true; target.scrollTop = source.scrollTop;
+function initSyncScroll() {
+  const vLeft = document.getElementById('viewer-left');
+  const vRight = document.getElementById('viewer-right');
+  const syncCheck = document.getElementById('sync-scroll-check');
+  let isSyncing = false;
+  const handleScroll = (source, target) => {
+    if (!syncCheck.checked) return;
+    if (isSyncing) return;
+    isSyncing = true;
+    target.scrollTop = source.scrollTop;
+    setTimeout(() => { isSyncing = false; }, 0); 
   };
-  vLeft.onscroll = handleScroll; vRight.onscroll = handleScroll;
+  vLeft.addEventListener('scroll', () => handleScroll(vLeft, vRight));
+  vRight.addEventListener('scroll', () => handleScroll(vRight, vLeft));
 }
+
+function toggleSyncScroll() { console.log("Sync Scroll Checked"); }
 
 function mergeAllMissing(direction) {
   const fromSide = (direction === 'toRight') ? 'left' : 'right', toSide = (direction === 'toRight') ? 'right' : 'left';
@@ -322,12 +344,7 @@ function mergeAllMissing(direction) {
       addedCount++;
     }
   });
-  if (addedCount > 0) {
-      alert(`已成功補齊 ${addedCount} 個項目。黃色區塊即為新增內容，請在存檔前進行 Review。`);
-      compareFiles(); 
-  } else {
-      alert("沒有發現缺失項目。");
-  }
+  if (addedCount > 0) { alert(`已補齊 ${addedCount} 個項目。`); compareFiles(); }
 }
 
 async function saveFileAs(side) {
@@ -338,7 +355,7 @@ async function saveFileAs(side) {
     try {
       const handle = await window.showSaveFilePicker({ suggestedName: defaultName, types: [{ description: 'Text Files', accept: { 'text/plain': ['.txt'] }, }], });
       const writable = await handle.createWritable(); await writable.write(output); await writable.close();
-      alert("檔案已儲存！"); return;
+      alert("儲存成功！"); return;
     } catch (err) { if (err.name === 'AbortError') return; }
   }
   const blob = new Blob([output], { type: 'text/plain' });
