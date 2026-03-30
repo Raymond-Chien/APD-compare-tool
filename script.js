@@ -1,6 +1,6 @@
 let apdData = {
-  left: { filename: '', blocks: new Map(), rawOrder: [] },
-  right: { filename: '', blocks: new Map(), rawOrder: [] }
+  left: { filename: '', blocks: new Map(), blocksMeta: new Map(), rawOrder: [], errors: [] },
+  right: { filename: '', blocks: new Map(), blocksMeta: new Map(), rawOrder: [], errors: [] }
 };
 
 // Track tags merged during this session
@@ -44,6 +44,9 @@ async function loadFile(event, side) {
   parseAPD(content, side);
   renderPanel(side);
   
+  // Show Health Report if errors exist
+  showHealthReport(side);
+
   // Auto-compare when both sides are loaded
   if (apdData.left.blocks.size > 0 && apdData.right.blocks.size > 0) {
     compareFiles();
@@ -51,106 +54,107 @@ async function loadFile(event, side) {
 }
 
 /**
- * APD Parsing Logic
- * Detects [TAG] ... [END] structure
+ * APD Parsing Logic with Hierarchy Support
  */
 function parseAPD(content, side) {
   const lines = content.split(/\r?\n/);
   const blocks = new Map();
+  const blocksMeta = new Map();
   const rawOrder = [];
+  const errors = [];
   
-  let currentTag = null;
-  let currentContent = [];
+  const tagStack = [];
 
-  for (let line of lines) {
+  lines.forEach((line, index) => {
+    const lineNum = index + 1;
     const trimmed = line.trim();
     
-    // Detect Tag Start: [SOMETHING] but not [END]
-    if (trimmed.startsWith('[') && trimmed.endsWith(']') && trimmed !== '[END]') {
-      currentTag = trimmed;
-      currentContent = [];
-    } else if (trimmed === '[END]') {
-      if (currentTag) {
-        blocks.set(currentTag, currentContent.join('\n'));
-        rawOrder.push(currentTag);
-        currentTag = null;
-      }
-    } else if (currentTag) {
-      currentContent.push(line); // Preserve whitespace of original line content
+    if (line.length > trimmed.length && !line.endsWith('\r') && !line.endsWith('\n')) {
+        if (line.match(/[ \t]+$/)) {
+            errors.push({
+                type: 'SPACE',
+                tag: tagStack.length > 0 ? tagStack[tagStack.length-1].name : 'Header/Global',
+                line: lineNum,
+                msg: `第 ${lineNum} 行結尾有隱藏空白。`
+            });
+        }
     }
+
+    if (line.includes('ABC12345XYZ') || line.includes('ABCDE1234567890')) {
+        errors.push({
+            type: 'PLACEHOLDER',
+            tag: tagStack.length > 0 ? tagStack[tagStack.length-1].name : 'Global',
+            line: lineNum,
+            msg: `偵測到預設佔位符 (Placeholder) 第 ${lineNum} 行。`
+        });
+    }
+
+    if (trimmed.startsWith('[') && trimmed.endsWith(']') && trimmed !== '[END]') {
+      const newTagName = trimmed;
+      if (tagStack.length > 0) {
+          tagStack[tagStack.length - 1].isContainer = true;
+          tagStack[tagStack.length - 1].childCount = (tagStack[tagStack.length - 1].childCount || 0) + 1;
+      }
+      tagStack.push({ name: newTagName, content: [], startLine: lineNum, level: tagStack.length, isContainer: false, childCount: 0 });
+      rawOrder.push(newTagName);
+    } else if (trimmed === '[END]') {
+      if (tagStack.length > 0) {
+        const finishedTag = tagStack.pop();
+        blocks.set(finishedTag.name, finishedTag.content.join('\n'));
+        blocksMeta.set(finishedTag.name, { isContainer: finishedTag.isContainer, level: finishedTag.level, childCount: finishedTag.childCount });
+      } else {
+        errors.push({ type: 'ORPHAN_END', tag: 'N/A', line: lineNum, msg: `第 ${lineNum} 行發現孤立的 [END]。` });
+      }
+    } else if (tagStack.length > 0) {
+      tagStack[tagStack.length - 1].content.push(line);
+    }
+  });
+
+  if (tagStack.length > 0) {
+    tagStack.forEach(tag => {
+        errors.push({ type: 'MISSING_END', tag: tag.name, line: tag.startLine, msg: `標籤 [${tag.name}] 尚未關閉。` });
+        blocks.set(tag.name, tag.content.join('\n'));
+        blocksMeta.set(tag.name, { isContainer: tag.isContainer, level: tag.level, childCount: tag.childCount });
+    });
   }
   
   apdData[side].blocks = blocks;
+  apdData[side].blocksMeta = blocksMeta;
   apdData[side].rawOrder = rawOrder;
+  apdData[side].errors = errors;
 }
 
-/**
- * Side-by-Side Comparison with Filter
- */
+function showHealthReport(side) {
+    const errors = apdData[side].errors;
+    if (errors.length === 0) return;
+    let report = `📋 APD 檔案格式檢查報告 (${apdData[side].filename})\n----------------------------------------\n`;
+    errors.slice(0, 10).forEach(err => { report += `• [${err.type}] ${err.msg}\n`; });
+    if (errors.length > 10) report += `... 以及其他 ${errors.length - 10} 個錯誤。\n`;
+    alert(report);
+}
+
 function compareFiles() {
   const leftBlocks = apdData.left.blocks;
   const rightBlocks = apdData.right.blocks;
-  
-  if (leftBlocks.size === 0 || rightBlocks.size === 0) return;
-
   const searchQuery = (document.getElementById('search-tag').value || "").trim().toLowerCase();
-
-  // Union of all tags
   const allTags = Array.from(new Set([...apdData.left.rawOrder, ...apdData.right.rawOrder]));
-  
-  // Filter tags based on search query
-  const filteredTags = searchQuery 
-    ? allTags.filter(tag => tag.toLowerCase().includes(searchQuery))
-    : allTags;
-
-  // Reset viewers
+  const filteredTags = searchQuery ? allTags.filter(tag => tag.toLowerCase().includes(searchQuery)) : allTags;
   const vLeft = document.getElementById('viewer-left');
   const vRight = document.getElementById('viewer-right');
-  vLeft.innerHTML = '';
-  vRight.innerHTML = '';
-
-  let diffCount = 0;
-  let missCount = 0;
-  let matchCount = 0;
+  vLeft.innerHTML = ''; vRight.innerHTML = '';
+  let diffCount = 0, missCount = 0, matchCount = 0;
 
   filteredTags.forEach(tag => {
-    const contentL = leftBlocks.get(tag);
-    const contentR = rightBlocks.get(tag);
-    
-    let stateL = 'normal';
-    let stateR = 'normal';
+    const contentL = leftBlocks.get(tag), contentR = rightBlocks.get(tag);
+    let stateL = 'normal', stateR = 'normal';
+    const normalize = (str) => { if (!str) return ""; return str.split(/\r?\n/).map(line => line.trim().toLowerCase()).filter((line, i, arr) => line !== "" || i < arr.findLastIndex(l => l.trim() !== "")).join('\n').trim(); };
+    const normL = normalize(contentL), normR = normalize(contentR);
 
-    // Normalization for comparison: Trim line, remove trailing empty, and ignore Case
-    const normalize = (str) => {
-      if (!str) return "";
-      return str.split(/\r?\n/)
-                .map(line => line.trim().toLowerCase()) 
-                .filter((line, i, arr) => line !== "" || i < arr.findLastIndex(l => l.trim() !== ""))
-                .join('\n').trim();
-    };
+    if (contentL === undefined) { stateL = 'empty'; stateR = 'diff-added'; missCount++; }
+    else if (contentR === undefined) { stateR = 'empty'; stateL = 'diff-removed'; missCount++; }
+    else if (normL !== normR) { stateL = 'diff-changed'; stateR = 'diff-changed'; diffCount++; }
+    else { matchCount++; stateL = 'match-success'; stateR = 'match-success'; }
 
-    const normL = normalize(contentL);
-    const normR = normalize(contentR);
-
-    if (contentL === undefined) {
-      stateL = 'empty';
-      stateR = 'diff-added'; // Right has it, Left doesn't
-      missCount++;
-    } else if (contentR === undefined) {
-      stateR = 'empty';
-      stateL = 'diff-removed'; // Left has it, Right doesn't
-      missCount++;
-    } else if (normL !== normR) {
-      stateL = 'diff-changed';
-      stateR = 'diff-changed';
-      diffCount++;
-    } else {
-      matchCount++;
-      stateL = 'match-success'; // Mark matches explicitly
-      stateR = 'match-success';
-    }
-
-    // Apply "Merged" state override
     if (mergedTags.left.has(tag)) stateL = 'merged-item';
     if (mergedTags.right.has(tag)) stateR = 'merged-item';
 
@@ -158,12 +162,10 @@ function compareFiles() {
     vRight.appendChild(createBlockEl(tag, contentR, stateR, 'right'));
   });
 
-  const overlay = document.getElementById('summary-overlay');
-  overlay.style.display = 'flex';
+  const overlay = document.getElementById('summary-overlay'); overlay.style.display = 'flex';
   document.getElementById('count-diff').textContent = diffCount;
   document.getElementById('count-miss').textContent = missCount;
   document.getElementById('count-match').textContent = matchCount;
-  
   syncScroll();
 }
 
@@ -171,6 +173,14 @@ function createBlockEl(tag, content, state, side) {
   const wrapper = document.createElement('div');
   wrapper.className = `apd-block ${state}`;
   if (state === 'empty') wrapper.classList.add('empty-block');
+
+  const meta = apdData[side].blocksMeta.get(tag) || { level: 0, isContainer: false, childCount: 0 };
+  const depth = meta.level || 0;
+  if (depth > 0) { wrapper.style.marginLeft = `${depth * 24}px`; wrapper.classList.add('child-block'); }
+
+  const hasErrors = apdData[side].errors.some(e => e.tag === tag);
+  if (hasErrors) wrapper.classList.add('has-errors');
+  if (meta.isContainer) { wrapper.classList.add('master-block'); wrapper.style.backgroundColor = 'rgba(255,255,255, 0.02)'; }
 
   if (state === 'empty') {
     wrapper.innerHTML = `<span>(缺失項目: ${tag})</span>`;
@@ -180,48 +190,49 @@ function createBlockEl(tag, content, state, side) {
 
   const header = document.createElement('div');
   header.className = 'block-header';
+  header.style.display = 'flex';
+  header.style.justifyContent = 'space-between';
+  header.style.alignItems = 'center';
   
-  let headerHTML = `<span>${tag}</span>`;
-  if (state === 'match-success') headerHTML += `<span class="status-badge badge-match">MATCH</span>`;
-  if (state === 'diff-changed') headerHTML += `<span class="status-badge badge-diff">DIFFERENT</span>`;
-  if (state === 'diff-removed' || state === 'diff-added') headerHTML += `<span class="status-badge badge-miss">MISSING</span>`;
-  if (state === 'merged-item') headerHTML += `<span class="status-badge badge-merged">NEW MERGED</span>`;
+  const leftGroup = document.createElement('div');
+  leftGroup.style.display = 'flex';
+  leftGroup.style.alignItems = 'center';
+  if (depth > 0) leftGroup.innerHTML = `<span style="color:#555; margin-right:4px;">└── </span>`;
+  leftGroup.innerHTML += `<span>${tag}</span>`;
+
+  const rightGroup = document.createElement('div');
+  rightGroup.style.display = 'flex';
+  rightGroup.style.alignItems = 'center';
+  rightGroup.style.gap = '6px';
   
-  header.innerHTML = headerHTML;
-  
-  // Undo/Cancel Button for Merged Items
+  if (meta.isContainer) rightGroup.innerHTML += `<span class="status-badge master-badge">📦 容器大項 (${meta.childCount})</span>`;
+  if (hasErrors) rightGroup.innerHTML += `<span class="status-badge" style="background:#d4a017; color:black;">⚠️ FORMAT</span>`;
+  if (state === 'match-success') rightGroup.innerHTML += `<span class="status-badge badge-match">MATCH</span>`;
+  if (state === 'diff-changed') rightGroup.innerHTML += `<span class="status-badge badge-diff">DIFFERENT</span>`;
+  if (state === 'diff-removed' || state === 'diff-added') rightGroup.innerHTML += `<span class="status-badge badge-miss">MISSING</span>`;
+  if (state === 'merged-item') rightGroup.innerHTML += `<span class="status-badge badge-merged">MERGED</span>`;
+
   if (state === 'merged-item') {
     const undoBtn = document.createElement('button');
-    undoBtn.className = 'undo-btn';
-    undoBtn.innerHTML = '❌ 取消補齊';
-    undoBtn.onclick = (e) => {
-      e.stopPropagation();
-      undoMerge(tag, side);
-    };
-    header.appendChild(undoBtn);
+    undoBtn.className = 'undo-btn'; undoBtn.innerHTML = '❌ 取消';
+    undoBtn.onclick = (e) => { e.stopPropagation(); undoMerge(tag, side); };
+    rightGroup.appendChild(undoBtn);
   }
 
   const copyBtn = document.createElement('button');
-  copyBtn.className = 'copy-btn';
-  copyBtn.innerHTML = side === 'left' ? '➡️' : '⬅️';
-  copyBtn.title = `複製此區塊到${side === 'left' ? '右側' : '左側'}`;
-  copyBtn.onclick = (e) => {
-    e.stopPropagation();
-    copyBlock(tag, side);
-  };
-  header.appendChild(copyBtn);
+  copyBtn.className = 'copy-btn'; copyBtn.innerHTML = side === 'left' ? '➡️' : '⬅️';
+  copyBtn.onclick = (e) => { e.stopPropagation(); copyBlock(tag, side); };
+  rightGroup.appendChild(copyBtn);
+
+  header.appendChild(leftGroup);
+  header.appendChild(rightGroup);
 
   const body = document.createElement('div');
-  body.className = 'block-content';
-  body.contentEditable = "true";
+  body.className = 'block-content'; body.contentEditable = "true";
   body.textContent = content;
-  body.onblur = () => {
-    apdData[side].blocks.set(tag, body.textContent);
-    compareFiles();
-  };
+  body.onblur = () => { apdData[side].blocks.set(tag, body.textContent); compareFiles(); };
 
-  wrapper.appendChild(header);
-  wrapper.appendChild(body);
+  wrapper.appendChild(header); wrapper.appendChild(body);
   return wrapper;
 }
 
@@ -229,226 +240,107 @@ function copyBlock(tag, fromSide) {
   const toSide = fromSide === 'left' ? 'right' : 'left';
   const newContent = apdData[fromSide].blocks.get(tag);
   const oldContent = apdData[toSide].blocks.get(tag);
-  
-  // Normalization for comparison
   const normalize = (str) => (str || "").split(/\r?\n/).map(l => l.trim().toLowerCase()).join('\n').trim();
   
   if (apdData[toSide].blocks.has(tag)) {
-    if (normalize(newContent) === normalize(oldContent)) {
-      alert(`⚠️ 項目「${tag}」內容已完全一致，不須重複變更。`);
-      return;
-    } else {
-      const confirmOverwrite = confirm(
-        `📌 項目「${tag}」內容已存在且不相同：\n\n` +
-        `【原始內容】:\n${oldContent.slice(0, 100)}${oldContent.length > 100 ? '...' : ''}\n\n` +
-        `【覆蓋內容】:\n${newContent.slice(0, 100)}${newContent.length > 100 ? '...' : ''}\n\n` +
-        `是否確定要執行覆蓋變更？`
-      );
-      if (!confirmOverwrite) return;
-      
-      // Save Original as Backup before overwriting
-      if (!originalBackups[toSide].has(tag)) {
-        originalBackups[toSide].set(tag, oldContent);
-      }
-    }
+    if (normalize(newContent) === normalize(oldContent)) { alert(`⚠️ 項目已一致。`); return; }
+    else { if (!confirm(`確定要覆蓋項目「${tag}」？`)) return; if (!originalBackups[toSide].has(tag)) originalBackups[toSide].set(tag, oldContent); }
   }
 
   apdData[toSide].blocks.set(tag, newContent);
-  mergedTags[toSide].add(tag); // Mark as merged
-
-  // Maintain order if it's new
-  if (!apdData[toSide].rawOrder.includes(tag)) {
-    apdData[toSide].rawOrder.push(tag);
-  }
-  
+  mergedTags[toSide].add(tag);
+  const fromMeta = apdData[fromSide].blocksMeta.get(tag);
+  if (fromMeta) apdData[toSide].blocksMeta.set(tag, {...fromMeta});
+  if (!apdData[toSide].rawOrder.includes(tag)) apdData[toSide].rawOrder.push(tag);
   compareFiles();
 
-  // Highlight and Scroll to the new block
   setTimeout(() => {
     const panels = ['viewer-left', 'viewer-right'];
     panels.forEach(panelId => {
       const viewer = document.getElementById(panelId);
       const blocks = viewer.getElementsByClassName('apd-block');
       for (let block of blocks) {
-        if (block.querySelector('.block-header span').textContent === tag) {
-          block.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          block.classList.add('flash-highlight');
-          setTimeout(() => block.classList.remove('flash-highlight'), 2000);
-        }
+          const headerSpan = block.querySelector('.block-header span:last-of-type');
+          if (headerSpan && headerSpan.textContent.includes(tag)) {
+              block.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              block.classList.add('flash-highlight');
+              setTimeout(() => block.classList.remove('flash-highlight'), 2000);
+          }
       }
     });
   }, 100);
 }
 
 function undoMerge(tag, side) {
-  if (originalBackups[side].has(tag)) {
-    // Restore the original content from backup
-    apdData[side].blocks.set(tag, originalBackups[side].get(tag));
-    originalBackups[side].delete(tag);
-  } else {
-    // If it was a truly new (missing) tag, remove it completely
-    apdData[side].blocks.delete(tag);
-    apdData[side].rawOrder = apdData[side].rawOrder.filter(t => t !== tag);
-  }
-  
-  mergedTags[side].delete(tag);
-  compareFiles();
+  if (originalBackups[side].has(tag)) { apdData[side].blocks.set(tag, originalBackups[side].get(tag)); originalBackups[side].delete(tag); }
+  else { apdData[side].blocks.delete(tag); apdData[side].blocksMeta.delete(tag); apdData[side].rawOrder = apdData[side].rawOrder.filter(t => t !== tag); }
+  mergedTags[side].delete(tag); compareFiles();
 }
 
-/**
- * Undo All Merges for a specific side
- */
 function undoAllMerges(side) {
-  if (mergedTags[side].size === 0) {
-    alert("目前沒有任何已補齊的項目可以取消。");
-    return;
-  }
-
-  if (!confirm(`確定要取消該側所有 (${mergedTags[side].size} 項) 的變更並還原嗎？`)) return;
-
+  if (mergedTags[side].size === 0) return;
+  if (!confirm(`還原該側所有變更嗎？`)) return;
   const tagsToUndo = Array.from(mergedTags[side]);
   tagsToUndo.forEach(tag => {
-    if (originalBackups[side].has(tag)) {
-      apdData[side].blocks.set(tag, originalBackups[side].get(tag));
-    } else {
-      apdData[side].blocks.delete(tag);
-      apdData[side].rawOrder = apdData[side].rawOrder.filter(t => t !== tag);
-    }
+    if (originalBackups[side].has(tag)) apdData[side].blocks.set(tag, originalBackups[side].get(tag));
+    else { apdData[side].blocks.delete(tag); apdData[side].blocksMeta.delete(tag); apdData[side].rawOrder = apdData[side].rawOrder.filter(t => t !== tag); }
   });
-
-  mergedTags[side].clear();
-  originalBackups[side].clear();
-  compareFiles();
-  alert("已成功還原所有變更。");
+  mergedTags[side].clear(); originalBackups[side].clear(); compareFiles();
 }
 
 function renderPanel(side) {
   const viewer = document.getElementById(`viewer-${side}`);
   viewer.innerHTML = '';
-  
-  apdData[side].rawOrder.forEach(tag => {
-    const content = apdData[side].blocks.get(tag);
-    viewer.appendChild(createBlockEl(tag, content, 'normal', side));
-  });
+  apdData[side].rawOrder.forEach(tag => { viewer.appendChild(createBlockEl(tag, apdData[side].blocks.get(tag), 'normal', side)); });
 }
 
 function syncScroll() {
-  const vLeft = document.getElementById('viewer-left');
-  const vRight = document.getElementById('viewer-right');
+  const vLeft = document.getElementById('viewer-left'); const vRight = document.getElementById('viewer-right');
   const isSync = document.getElementById('sync-scroll-check').checked;
-  
-  if (!isSync) {
-    vLeft.onscroll = null;
-    vRight.onscroll = null;
-    return;
-  }
-
-  // Improved immediate sync with lock to prevent recursion
+  if (!isSync) { vLeft.onscroll = null; vRight.onscroll = null; return; }
   const handleScroll = (e) => {
-    const source = e.target;
-    const target = (source === vLeft) ? vRight : vLeft;
-    
-    if (source._syncing) {
-        source._syncing = false;
-        return;
-    }
-    
-    target._syncing = true;
-    target.scrollTop = source.scrollTop;
+    const source = e.target; const target = (source === vLeft) ? vRight : vLeft;
+    if (source._syncing) { source._syncing = false; return; }
+    target._syncing = true; target.scrollTop = source.scrollTop;
   };
-
-  vLeft.onscroll = handleScroll;
-  vRight.onscroll = handleScroll;
+  vLeft.onscroll = handleScroll; vRight.onscroll = handleScroll;
 }
 
-function toggleSyncScroll() {
-  syncScroll();
-}
-
-/**
- * Merge All Missing Tags from one side to the other
- * @param {string} direction 'toRight' or 'toLeft'
- */
 function mergeAllMissing(direction) {
-  const fromSide = (direction === 'toRight') ? 'left' : 'right';
-  const toSide = (direction === 'toRight') ? 'right' : 'left';
-  
-  const fromData = apdData[fromSide];
-  const toData = apdData[toSide];
-  
+  const fromSide = (direction === 'toRight') ? 'left' : 'right', toSide = (direction === 'toRight') ? 'right' : 'left';
+  const fromData = apdData[fromSide], toData = apdData[toSide];
   let addedCount = 0;
-  
   fromData.blocks.forEach((content, tag) => {
     if (!toData.blocks.has(tag)) {
-      toData.blocks.set(tag, content);
-      mergedTags[toSide].add(tag); // Mark as merged
-
-      // Determine logical insertion point (after the previous tag from source)
+      toData.blocks.set(tag, content); mergedTags[toSide].add(tag);
+      const m = fromData.blocksMeta.get(tag); if (m) toData.blocksMeta.set(tag, {...m});
       const sourceIndex = fromData.rawOrder.indexOf(tag);
       if (sourceIndex > 0) {
-        const prevTag = fromData.rawOrder[sourceIndex - 1];
-        const targetIndex = toData.rawOrder.indexOf(prevTag);
-        if (targetIndex !== -1) {
-          toData.rawOrder.splice(targetIndex + 1, 0, tag);
-        } else {
-          toData.rawOrder.push(tag);
-        }
-      } else {
-        toData.rawOrder.unshift(tag);
-      }
+        const prevTag = fromData.rawOrder[sourceIndex - 1], targetIndex = toData.rawOrder.indexOf(prevTag);
+        if (targetIndex !== -1) toData.rawOrder.splice(targetIndex + 1, 0, tag); else toData.rawOrder.push(tag);
+      } else toData.rawOrder.unshift(tag);
       addedCount++;
     }
   });
-
   if (addedCount > 0) {
-    alert(`已完成補齊：成功將 ${addedCount} 個缺失項目移至${toSide === 'left' ? '左側' : '右側'}`);
-    compareFiles();
+      alert(`已成功補齊 ${addedCount} 個項目。黃色區塊即為新增內容，請在存檔前進行 Review。`);
+      compareFiles(); 
   } else {
-    alert("沒有發現缺失項目需要補齊。");
+      alert("沒有發現缺失項目。");
   }
 }
 
-/**
- * Save As functionality using Modern File System Access API if available
- */
 async function saveFileAs(side) {
-  const data = apdData[side];
-  if (!data.blocks.size) return;
-
-  let output = "";
-  data.rawOrder.forEach(tag => {
-    output += `${tag}\n${data.blocks.get(tag)}\n[END]\n\n`;
-  });
-
+  const data = apdData[side]; if (!data.blocks.size) return;
+  let output = ""; data.rawOrder.forEach(tag => { output += `${tag}\n${data.blocks.get(tag)}\n[END]\n\n`; });
   const defaultName = data.filename || `apd_output_${side}.txt`;
-
-  // Try modern "Save As" picker
   if ('showSaveFilePicker' in window) {
     try {
-      const handle = await window.showSaveFilePicker({
-        suggestedName: defaultName,
-        types: [{
-          description: 'Text Files',
-          accept: { 'text/plain': ['.txt'] },
-        }],
-      });
-      const writable = await handle.createWritable();
-      await writable.write(output);
-      await writable.close();
-      alert("檔案已成功儲存！");
-      return;
-    } catch (err) {
-      if (err.name === 'AbortError') return;
-      console.warn("Save Picker failed, falling back to download", err);
-    }
+      const handle = await window.showSaveFilePicker({ suggestedName: defaultName, types: [{ description: 'Text Files', accept: { 'text/plain': ['.txt'] }, }], });
+      const writable = await handle.createWritable(); await writable.write(output); await writable.close();
+      alert("檔案已儲存！"); return;
+    } catch (err) { if (err.name === 'AbortError') return; }
   }
-
-  // Fallback to legacy download
   const blob = new Blob([output], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = defaultName;
-  a.click();
-  URL.revokeObjectURL(url);
+  const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = defaultName; a.click(); URL.revokeObjectURL(url);
 }
